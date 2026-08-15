@@ -1,0 +1,46 @@
+#include <iostream>
+#include <vector>
+#include <cmath>
+
+struct Atom {
+    int id;
+    double x, y, z;
+    double fx, fy, fz;
+};
+
+class MechanosynthesisEngine {
+private:
+    double k_piezo = 0.5; // Constante de rigidez de la punta (N/m)
+
+public:
+    // Calcula la repulsión/atracción de Pauli/Van der Waals básica
+    void compute_probe_force(Atom& probe_tip, const Atom& target) {
+        double dx = target.x - probe_tip.x;
+        double dy = target.y - probe_tip.y;
+        double dz = target.z - probe_tip.z;
+        double r = std::sqrt(dx*dx + dy*dy + dz*dz);
+
+        // Potencial Lennard-Jones 12-6 ajustado para interacción C-H
+        double epsilon = 0.0038; // eV
+        double sigma = 0.28;     // nm
+        
+        double term6 = std::pow(sigma / r, 6);
+        double term12 = term6 * term6;
+        double f_magnitude = (24.0 * epsilon / r) * (2.0 * term12 - term6);
+
+        probe_tip.fx = f_magnitude * (dx / r);
+        probe_tip.fy = f_magnitude * (dy / r);
+        probe_tip.fz = f_magnitude * (dz / r);
+    }
+};
+
+int main() {
+    Atom tip{1, 0.0, 0.0, 0.15, 0.0, 0.0, 0.0};   // Punta Adamantilo a 1.5 Å
+    Atom h_target{2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; // Hidrógeno en la red C(111)
+
+    MechanosynthesisEngine engine;
+    engine.compute_probe_force(tip, h_target);
+
+    std::cout << "[ATOMOS CORE] Fuerza de aproximación en Z: " << tip.fz << " eV/nm\n";
+    return 0;
+}
