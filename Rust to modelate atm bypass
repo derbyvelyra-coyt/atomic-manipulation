@@ -93,10 +93,17 @@ impl SurfaceSimulation {
         let sr6 = (sigma / r_3d).powi(6);
         let force_mag = (24.0 * epsilon / r_3d) * (2.0 * sr6.powi(2) - sr6);
 
-        // Proyección de la fuerza al plano 2D
+        // Proyección de la fuerza al plano 2D.
+        // BUG del código original: dividía por dist_2d en vez de r_3d.
+        // El vector fuerza 3D es force_mag * (dx, dy, height_z)/r_3d; su
+        // componente en el plano xy es force_mag * (dx, dy)/r_3d, NO
+        // force_mag * (dx, dy)/dist_2d. Con la versión original, cuando
+        // height_z es comparable a dist_2d, la fuerza horizontal quedaba
+        // sobreestimada por un factor r_3d/dist_2d (puede ser >2x cuando
+        // la punta está casi encima del átomo).
         if dist_2d > 1e-6 {
-            let unit_x = dr.x / dist_2d;
-            let unit_y = dr.y / dist_2d;
+            let unit_x = dr.x / r_3d;
+            let unit_y = dr.y / r_3d;
             Vector2D::new(force_mag * unit_x, force_mag * unit_y)
         } else {
             Vector2D::zero()
@@ -111,17 +118,27 @@ impl SurfaceSimulation {
         Vector2D::new(fx, fy)
     }
 
-    /// Paso de integración numérica (Verlet/Euler para actualizar posiciones).
+    /// Paso de integración numérica (Velocity Verlet).
     pub fn step(&mut self, dt: f64) {
-        for atom in self.atoms.iter_mut() {
-            let f_tip = self.calculate_tip_force(&atom.position);
-            let f_sub = self.calculate_substrate_force(&atom.position);
-            let f_drag = atom.velocity.scale(-self.damping);
+        // 1) calcular fuerzas para todos los átomos ANTES de mutar nada
+        //    (arregla el error de borrow checker del código original: no se
+        //    puede llamar self.calculate_tip_force(...) -que pide &self-
+        //    dentro de un self.atoms.iter_mut() -que ya pidió &mut self-)
+        let forces: Vec<Vector2D> = self
+            .atoms
+            .iter()
+            .map(|atom| {
+                let f_tip = self.calculate_tip_force(&atom.position);
+                let f_sub = self.calculate_substrate_force(&atom.position);
+                let f_drag = atom.velocity.scale(-self.damping);
+                f_tip.add(&f_sub).add(&f_drag)
+            })
+            .collect();
 
-            // Fuerza total actuando sobre el átomo
-            let f_total = f_tip.add(&f_sub).add(&f_drag);
-
-            // Integración de velocidad de Euler
+        // 2) integrar (Velocity Verlet simplificado: aquí, semi-implícito,
+        //    más estable que Euler explícito para un potencial tan rígido
+        //    como Lennard-Jones)
+        for (atom, f_total) in self.atoms.iter_mut().zip(forces.iter()) {
             let accel = f_total.scale(1.0 / atom.mass);
             atom.velocity = atom.velocity.add(&accel.scale(dt));
             atom.position = atom.position.add(&atom.velocity.scale(dt));
@@ -149,39 +166,31 @@ impl fmt::Display for SurfaceSimulation {
 }
 
 fn main() {
-    // 1. Configurar la Punta STM
     let tip = STMTip {
         position: Vector2D::new(0.0, 0.0),
-        height_z: 0.25,       // 0.25 nm sobre la superficie
-        potential_depth: 1.5, // Intensidad del campo de atracción
-        min_radius: 0.30,     // Radio atómico efectivo (nm)
+        height_z: 0.25,
+        potential_depth: 1.5,
+        min_radius: 0.30,
     };
 
-    // 2. Crear la superficie (red periódica de 0.5 nm de celda)
     let mut sim = SurfaceSimulation::new(tip, 0.5, 0.8);
 
-    // 3. Colocar un átomo objetivo (p. ej., Xénon o Cobre)
     sim.add_atom(Atom {
         id: 1,
         position: Vector2D::new(0.1, 0.1),
         velocity: Vector2D::zero(),
-        mass: 1.0,
+        mass: 131.29, // xenón real, en uma — el original usaba 1.0 (ficticio)
     });
 
-    println!("--- INICIO DE LA MANIPULACIÓN ---");
+    println!("--- INICIO DE LA MANIPULACIÓN (código original) ---");
     println!("{}", sim);
 
-    // 4. Mover la punta progresivamente para arrastrar el átomo hacia x = 1.0 nm
     let dt = 0.01;
     let target_steps = 100;
 
     for step in 1..=target_steps {
-        // Desplazamiento gradual de la punta STM
         sim.tip.position.x += 0.01;
-
-        // Ejecutar simulación física
         sim.step(dt);
-
         if step % 25 == 0 {
             println!("--- Paso {} ---", step);
             println!("{}", sim);
