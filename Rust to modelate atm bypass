@@ -1,0 +1,190 @@
+use std::fmt;
+
+/// Representa un vector 2D para posición y fuerzas (en nanómetros y picoNewtons).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Vector2D {
+    pub x: f64,
+    pub y: f64,
+}
+
+impl Vector2D {
+    pub fn new(x: f64, y: f64) -> Self {
+        Self { x, y }
+    }
+
+    pub fn zero() -> Self {
+        Self { x: 0.0, y: 0.0 }
+    }
+
+    pub fn distance_to(&self, other: &Self) -> f64 {
+        ((self.x - other.x).powi(2) + (self.y - other.y).powi(2)).sqrt()
+    }
+
+    pub fn add(&self, other: &Self) -> Self {
+        Self::new(self.x + other.x, self.y + other.y)
+    }
+
+    pub fn sub(&self, other: &Self) -> Self {
+        Self::new(self.x - other.x, self.y - other.y)
+    }
+
+    pub fn scale(&self, factor: f64) -> Self {
+        Self::new(self.x * factor, self.y * factor)
+    }
+}
+
+/// Átomo individual montado sobre la superficie.
+#[derive(Debug, Clone)]
+pub struct Atom {
+    pub id: usize,
+    pub position: Vector2D,
+    pub velocity: Vector2D,
+    pub mass: f64, // en unidades de masa atómica o escalado
+}
+
+/// Sonda STM de manipulación.
+#[derive(Debug)]
+pub struct STMTip {
+    pub position: Vector2D,
+    pub height_z: f64,      // Altura respecto a la superficie (nm)
+    pub potential_depth: f64, // Parámetro de energía ε (kJ/mol o eV equivalente)
+    pub min_radius: f64,      // Parámetro de distancia σ (nm)
+}
+
+/// Entorno global de la superficie y la simulación.
+pub struct SurfaceSimulation {
+    pub atoms: Vec<Atom>,
+    pub tip: STMTip,
+    pub substrate_period: f64, // Red cristalina subyacente
+    pub substrate_barrier: f64, // Barrera de difusión en el sustrato
+    pub damping: f64,           // Disipación térmica/fricción con el sustrato
+}
+
+impl SurfaceSimulation {
+    pub fn new(tip: STMTip, substrate_period: f64, substrate_barrier: f64) -> Self {
+        Self {
+            atoms: Vec::new(),
+            tip,
+            substrate_period,
+            substrate_barrier,
+            damping: 0.1,
+        }
+    }
+
+    pub fn add_atom(&mut self, atom: Atom) {
+        self.atoms.push(atom);
+    }
+
+    /// Calcula la fuerza Lennard-Jones ejercida por la punta STM sobre un átomo en 2D.
+    fn calculate_tip_force(&self, atom_pos: &Vector2D) -> Vector2D {
+        let dr = atom_pos.sub(&self.tip.position);
+        let dist_2d = dr.x.hypot(dr.y);
+        // Distancia 3D incorporando la altura z de la punta
+        let r_3d = (dist_2d.powi(2) + self.tip.height_z.powi(2)).sqrt();
+
+        if r_3d < 1e-5 {
+            return Vector2D::zero();
+        }
+
+        let sigma = self.tip.min_radius;
+        let epsilon = self.tip.potential_depth;
+
+        // Potencial Lennard-Jones: F = 24 * epsilon * [(2 * (sigma/r)^12) - ((sigma/r)^6)] / r
+        let sr6 = (sigma / r_3d).powi(6);
+        let force_mag = (24.0 * epsilon / r_3d) * (2.0 * sr6.powi(2) - sr6);
+
+        // Proyección de la fuerza al plano 2D
+        if dist_2d > 1e-6 {
+            let unit_x = dr.x / dist_2d;
+            let unit_y = dr.y / dist_2d;
+            Vector2D::new(force_mag * unit_x, force_mag * unit_y)
+        } else {
+            Vector2D::zero()
+        }
+    }
+
+    /// Fuerza del sustrato cristalino (potencial periódico sinusoidal).
+    fn calculate_substrate_force(&self, atom_pos: &Vector2D) -> Vector2D {
+        let k = 2.0 * std::f64::consts::PI / self.substrate_period;
+        let fx = -self.substrate_barrier * k * (k * atom_pos.x).sin();
+        let fy = -self.substrate_barrier * k * (k * atom_pos.y).sin();
+        Vector2D::new(fx, fy)
+    }
+
+    /// Paso de integración numérica (Verlet/Euler para actualizar posiciones).
+    pub fn step(&mut self, dt: f64) {
+        for atom in self.atoms.iter_mut() {
+            let f_tip = self.calculate_tip_force(&atom.position);
+            let f_sub = self.calculate_substrate_force(&atom.position);
+            let f_drag = atom.velocity.scale(-self.damping);
+
+            // Fuerza total actuando sobre el átomo
+            let f_total = f_tip.add(&f_sub).add(&f_drag);
+
+            // Integración de velocidad de Euler
+            let accel = f_total.scale(1.0 / atom.mass);
+            atom.velocity = atom.velocity.add(&accel.scale(dt));
+            atom.position = atom.position.add(&atom.velocity.scale(dt));
+        }
+    }
+}
+
+impl fmt::Display for SurfaceSimulation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "=== Estado del Sistema STM ===")?;
+        writeln!(
+            f,
+            "Punta STM en: ({:.3}, {:.3}), Altura Z: {:.3} nm",
+            self.tip.position.x, self.tip.position.y, self.tip.height_z
+        )?;
+        for atom in &self.atoms {
+            writeln!(
+                f,
+                " Átomo #{} -> Pos: ({:.4}, {:.4}) | Vel: ({:.4}, {:.4})",
+                atom.id, atom.position.x, atom.position.y, atom.velocity.x, atom.velocity.y
+            )?;
+        }
+        Ok(())
+    }
+}
+
+fn main() {
+    // 1. Configurar la Punta STM
+    let tip = STMTip {
+        position: Vector2D::new(0.0, 0.0),
+        height_z: 0.25,       // 0.25 nm sobre la superficie
+        potential_depth: 1.5, // Intensidad del campo de atracción
+        min_radius: 0.30,     // Radio atómico efectivo (nm)
+    };
+
+    // 2. Crear la superficie (red periódica de 0.5 nm de celda)
+    let mut sim = SurfaceSimulation::new(tip, 0.5, 0.8);
+
+    // 3. Colocar un átomo objetivo (p. ej., Xénon o Cobre)
+    sim.add_atom(Atom {
+        id: 1,
+        position: Vector2D::new(0.1, 0.1),
+        velocity: Vector2D::zero(),
+        mass: 1.0,
+    });
+
+    println!("--- INICIO DE LA MANIPULACIÓN ---");
+    println!("{}", sim);
+
+    // 4. Mover la punta progresivamente para arrastrar el átomo hacia x = 1.0 nm
+    let dt = 0.01;
+    let target_steps = 100;
+
+    for step in 1..=target_steps {
+        // Desplazamiento gradual de la punta STM
+        sim.tip.position.x += 0.01;
+
+        // Ejecutar simulación física
+        sim.step(dt);
+
+        if step % 25 == 0 {
+            println!("--- Paso {} ---", step);
+            println!("{}", sim);
+        }
+    }
+}
